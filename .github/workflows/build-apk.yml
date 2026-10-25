@@ -1,47 +1,88 @@
 
-name: Oda Sesli Arama APK
+name: Android APK Otomatik Derleme
 
 on:
+  push:
+    branches:
+      - "**"
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Android APK Derle
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Depoyu indir
+      - name: Kaynak kodunu indir
         uses: actions/checkout@v4
 
       - name: Java 17 kur
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Gradle kur
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+          java-version: "17"
 
       - name: Android SDK kur
         uses: android-actions/setup-android@v3
 
-      - name: Android lisanslarını kabul et
+      - name: Android SDK paketlerini kur
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Android lisanslarini kabul et
         run: yes | sdkmanager --licenses || true
+
+      - name: Gradle 8.9 kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Proje dosyalarini kontrol et
+        run: |
+          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
+            echo "::error::settings.gradle veya settings.gradle.kts bulunamadi."
+            exit 1
+          fi
+
+          if [ ! -f app/build.gradle ] && [ ! -f app/build.gradle.kts ]; then
+            echo "::error::app/build.gradle veya app/build.gradle.kts bulunamadi."
+            exit 1
+          fi
 
       - name: APK derle
         run: |
-          if [ ! -f settings.gradle ] || [ ! -f app/build.gradle ]; then
-            echo "HATA: Android proje dosyalari depoda bulunamadi."
-            echo "Bu workflow tek basina Android uygulamasinin kaynak kodunu olusturmaz."
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon assembleDebug
+          else
+            gradle --no-daemon assembleDebug
+          fi
+
+      - name: APK dosyasini kontrol et
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK olusturulamadi."
+            find app/build/outputs -type f 2>/dev/null || true
             exit 1
           fi
-          gradle --no-daemon assembleDebug
 
-      - name: APK dosyasini yukle
+          echo "APK basariyla olusturuldu: $APK"
+
+      - name: APK dosyasini indirilebilir yap
         uses: actions/upload-artifact@v4
         with:
           name: OdaSesliArama-APK
