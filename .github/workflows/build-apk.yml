@@ -2,28 +2,18 @@
 name: Android APK Otomatik Derleme
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "**"
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: android-apk-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
-    name: APK Derle
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Depoyu indir
@@ -35,71 +25,171 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Android SDK paketlerini kur
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
-
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
-          fi
-
-          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager bulunamadi."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
       - name: Gradle kur
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Android proje dosyalarini kontrol et
+      - name: Android SDK kur
+        uses: android-actions/setup-android@v3
+
+      - name: SDK paketlerini kur
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+          yes | sdkmanager --licenses || true
+
+      - name: Android projesini olustur
         shell: bash
         run: |
           set -e
 
-          if [ ! -f settings.gradle ] && [ ! -f settings.gradle.kts ]; then
-            echo "::error::settings.gradle dosyasi bulunamadi."
-            exit 1
-          fi
+          mkdir -p app/src/main/java/tr/boran/odasesliarama
 
-          if [ ! -f app/build.gradle ] && [ ! -f app/build.gradle.kts ]; then
-            echo "::error::app/build.gradle dosyasi bulunamadi."
-            exit 1
-          fi
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "OdaSesliArama"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'tr.boran.odasesliarama'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'tr.boran.odasesliarama'
+                  minSdk 23
+                  targetSdk 28
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:label="Oda Sesli Arama"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/tr/boran/odasesliarama/MainActivity.java <<'EOF'
+          package tr.boran.odasesliarama;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.graphics.Typeface;
+          import android.view.Gravity;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setGravity(Gravity.CENTER);
+                  layout.setPadding(28, 28, 28, 28);
+
+                  TextView title = new TextView(this);
+                  title.setText("Oda Sesli Arama");
+                  title.setTextSize(26);
+                  title.setTypeface(null, Typeface.BOLD);
+                  title.setGravity(Gravity.CENTER);
+
+                  TextView info = new TextView(this);
+                  info.setText("Oda kodunu girerek arama odana katilabilirsin.");
+                  info.setTextSize(16);
+                  info.setGravity(Gravity.CENTER);
+
+                  EditText room = new EditText(this);
+                  room.setHint("Oda kodu");
+                  room.setSingleLine(true);
+
+                  Button join = new Button(this);
+                  join.setText("Odaya Katil");
+
+                  TextView status = new TextView(this);
+                  status.setText("Baglanti sunucusu henuz ayarlanmadi.");
+                  status.setTextSize(15);
+                  status.setGravity(Gravity.CENTER);
+
+                  join.setOnClickListener(v -> {
+                      String code = room.getText().toString().trim();
+                      if (code.isEmpty()) {
+                          room.setError("Bir oda kodu gir");
+                      } else {
+                          status.setText(
+                              "Oda kodun: " + code +
+                              "\nSesli arama icin WebRTC ve erisilebilir bir sinyal sunucusu gerekir."
+                          );
+                      }
+                  });
+
+                  layout.addView(title, new LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  layout.addView(info);
+                  layout.addView(room);
+                  layout.addView(join);
+                  layout.addView(status);
+
+                  setContentView(layout);
+              }
+          }
+          EOF
 
       - name: APK derle
-        shell: bash
-        run: |
-          set -e
+        run: gradle --no-daemon assembleDebug
 
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-            ./gradlew --no-daemon assembleDebug
-          else
-            gradle --no-daemon assembleDebug
-          fi
-
-      - name: APK dosyasini dogrula
-        shell: bash
-        run: |
-          if [ ! -f app/build/outputs/apk/debug/app-debug.apk ]; then
-            echo "::error::Derleme tamamlandi ancak APK bulunamadi."
-            find app/build/outputs -type f 2>/dev/null || true
-            exit 1
-          fi
-
-      - name: APK dosyasini indirilebilir yap
+      - name: APK dosyasini yukle
         uses: actions/upload-artifact@v4
         with:
           name: OdaSesliArama-APK
