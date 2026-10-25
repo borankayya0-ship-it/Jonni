@@ -1,17 +1,22 @@
 
-name: Android APK Otomatik Derleme
+name: Oda Sesli Arama APK
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - "**"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: oda-sesli-arama-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Uygulamayi olustur ve APK derle
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -23,30 +28,31 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-
-      - name: Gradle kur
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
+          java-version: '17'
 
       - name: Android SDK kur
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
-      - name: SDK paketlerini kur
-        run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-          yes | sdkmanager --licenses || true
-
-      - name: Android projesini olustur
+      - name: Android API paketlerini kur
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
 
-          mkdir -p app/src/main/java/tr/boran/odasesliarama
+      - name: Gradle 8.9 kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Android uygulama kaynaklarini olustur
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/tr/boran/odasesliarama app/src/main/assets
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -74,7 +80,8 @@ jobs:
           EOF
 
           cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
           android.useAndroidX=true
           EOF
 
@@ -92,24 +99,38 @@ jobs:
                   minSdk 23
                   targetSdk 28
                   versionCode 1
-                  versionName '1.0'
+                  versionName '1.0.0'
               }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.12.1'
           }
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
               <application
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:allowBackup="false"
                   android:label="Oda Sesli Arama"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
                   android:usesCleartextTraffic="false">
                   <activity
                       android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
                       android:exported="true">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
               </application>
@@ -119,81 +140,410 @@ jobs:
           cat > app/src/main/java/tr/boran/odasesliarama/MainActivity.java <<'EOF'
           package tr.boran.odasesliarama;
 
+          import android.Manifest;
           import android.app.Activity;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
           import android.os.Bundle;
-          import android.graphics.Typeface;
-          import android.view.Gravity;
           import android.view.ViewGroup;
-          import android.widget.Button;
-          import android.widget.EditText;
-          import android.widget.LinearLayout;
-          import android.widget.TextView;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+
+          import androidx.webkit.WebViewAssetLoader;
+          import androidx.webkit.WebViewClientCompat;
+
+          import java.util.ArrayList;
+          import java.util.List;
 
           public class MainActivity extends Activity {
+              private static final int REQUEST_MICROPHONE = 2101;
+              private static final String APP_ORIGIN =
+                  "https://appassets.androidplatform.net/";
+
+              private WebView webView;
+              private PermissionRequest pendingPermissionRequest;
+              private WebViewAssetLoader assetLoader;
+
               @Override
-              public void onCreate(Bundle savedInstanceState) {
+              protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  LinearLayout layout = new LinearLayout(this);
-                  layout.setOrientation(LinearLayout.VERTICAL);
-                  layout.setGravity(Gravity.CENTER);
-                  layout.setPadding(28, 28, 28, 28);
+                  assetLoader = new WebViewAssetLoader.Builder()
+                      .addPathHandler(
+                          "/assets/",
+                          new WebViewAssetLoader.AssetsPathHandler(this)
+                      )
+                      .build();
 
-                  TextView title = new TextView(this);
-                  title.setText("Oda Sesli Arama");
-                  title.setTextSize(26);
-                  title.setTypeface(null, Typeface.BOLD);
-                  title.setGravity(Gravity.CENTER);
+                  webView = new WebView(this);
+                  webView.setLayoutParams(new ViewGroup.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT,
+                      ViewGroup.LayoutParams.MATCH_PARENT
+                  ));
 
-                  TextView info = new TextView(this);
-                  info.setText("Oda kodunu girerek arama odana katilabilirsin.");
-                  info.setTextSize(16);
-                  info.setGravity(Gravity.CENTER);
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+                  settings.setAllowFileAccess(false);
+                  settings.setAllowContentAccess(false);
+                  settings.setMixedContentMode(
+                      WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                  );
 
-                  EditText room = new EditText(this);
-                  room.setHint("Oda kodu");
-                  room.setSingleLine(true);
-
-                  Button join = new Button(this);
-                  join.setText("Odaya Katil");
-
-                  TextView status = new TextView(this);
-                  status.setText("Baglanti sunucusu henuz ayarlanmadi.");
-                  status.setTextSize(15);
-                  status.setGravity(Gravity.CENTER);
-
-                  join.setOnClickListener(v -> {
-                      String code = room.getText().toString().trim();
-                      if (code.isEmpty()) {
-                          room.setError("Bir oda kodu gir");
-                      } else {
-                          status.setText(
-                              "Oda kodun: " + code +
-                              "\nSesli arama icin WebRTC ve erisilebilir bir sinyal sunucusu gerekir."
+                  webView.setWebViewClient(new WebViewClientCompat() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(
+                              WebView view, WebResourceRequest request) {
+                          return assetLoader.shouldInterceptRequest(
+                              request.getUrl()
                           );
+                      }
+
+                      @Override
+                      public boolean shouldOverrideUrlLoading(
+                              WebView view, WebResourceRequest request) {
+                          Uri uri = request.getUrl();
+                          return !uri.toString().startsWith(APP_ORIGIN);
                       }
                   });
 
-                  layout.addView(title, new LinearLayout.LayoutParams(
-                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-                  layout.addView(info);
-                  layout.addView(room);
-                  layout.addView(join);
-                  layout.addView(status);
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(PermissionRequest request) {
+                          runOnUiThread(
+                              () -> handleWebPermissionRequest(request)
+                          );
+                      }
 
-                  setContentView(layout);
+                      @Override
+                      public void onPermissionRequestCanceled(
+                              PermissionRequest request) {
+                          if (pendingPermissionRequest == request) {
+                              pendingPermissionRequest = null;
+                          }
+                      }
+                  });
+
+                  setContentView(webView);
+                  webView.loadUrl(APP_ORIGIN + "assets/index.html");
+              }
+
+              private void handleWebPermissionRequest(
+                      PermissionRequest request) {
+                  boolean asksForAudio = false;
+
+                  for (String resource : request.getResources()) {
+                      if (PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                              .equals(resource)) {
+                          asksForAudio = true;
+                      }
+                  }
+
+                  if (!asksForAudio) {
+                      request.deny();
+                      return;
+                  }
+
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                          == PackageManager.PERMISSION_GRANTED) {
+                      grantAudioOnly(request);
+                  } else {
+                      pendingPermissionRequest = request;
+                      requestPermissions(
+                          new String[] { Manifest.permission.RECORD_AUDIO },
+                          REQUEST_MICROPHONE
+                      );
+                  }
+              }
+
+              private void grantAudioOnly(PermissionRequest request) {
+                  List<String> allowed = new ArrayList<>();
+
+                  for (String resource : request.getResources()) {
+                      if (PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                              .equals(resource)) {
+                          allowed.add(resource);
+                      }
+                  }
+
+                  if (allowed.isEmpty()) {
+                      request.deny();
+                  } else {
+                      request.grant(allowed.toArray(new String[0]));
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(
+                      int requestCode,
+                      String[] permissions,
+                      int[] grantResults) {
+                  super.onRequestPermissionsResult(
+                      requestCode, permissions, grantResults
+                  );
+
+                  if (requestCode == REQUEST_MICROPHONE) {
+                      PermissionRequest request = pendingPermissionRequest;
+                      pendingPermissionRequest = null;
+
+                      if (request == null) {
+                          return;
+                      }
+
+                      if (grantResults.length > 0
+                              && grantResults[0]
+                              == PackageManager.PERMISSION_GRANTED) {
+                          grantAudioOnly(request);
+                      } else {
+                          request.deny();
+                      }
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (pendingPermissionRequest != null) {
+                      pendingPermissionRequest.deny();
+                      pendingPermissionRequest = null;
+                  }
+
+                  if (webView != null) {
+                      webView.stopLoading();
+                      webView.loadUrl("about:blank");
+                      webView.setWebChromeClient(null);
+                      webView.setWebViewClient(null);
+                      webView.destroy();
+                      webView = null;
+                  }
+
+                  super.onDestroy();
               }
           }
           EOF
 
-      - name: APK derle
-        run: gradle --no-daemon assembleDebug
+          cat > app/src/main/assets/index.html <<'EOF'
+          <!doctype html>
+          <html lang="tr">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+            <meta name="theme-color" content="#101827">
+            <title>Oda Sesli Arama</title>
+            <style>
+              :root {
+                color-scheme: dark;
+                --bg: #0b1220;
+                --card: #131e30;
+                --line: #29384e;
+                --text: #f3f6fc;
+                --muted: #a8b4c7;
+                --blue: #3478f6;
+                --green: #1eaa73;
+                --red: #df4a59;
+              }
+              * { box-sizing: border-box; }
+              body {
+                margin: 0;
+                min-height: 100vh;
+                background: radial-gradient(circle at top,#1a2b48 0,#0b1220 55%);
+                font-family: system-ui,-apple-system,Roboto,Arial,sans-serif;
+                color: var(--text);
+                padding: 22px 16px 34px;
+              }
+              .wrap { max-width: 520px; margin: 0 auto; }
+              .brand {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin: 8px 0 22px;
+              }
+              .logo {
+                height: 48px;
+                width: 48px;
+                border-radius: 15px;
+                background: linear-gradient(135deg,#3478f6,#6e56cf);
+                display: grid;
+                place-items: center;
+                font-size: 25px;
+              }
+              .brand h1 { font-size: 22px; margin: 0; }
+              .brand p { color: var(--muted); margin: 5px 0 0; font-size: 13px; }
+              .card {
+                background: #131e30f2;
+                border: 1px solid var(--line);
+                border-radius: 20px;
+                padding: 18px;
+                margin: 14px 0;
+              }
+              .label {
+                font-size: 13px;
+                color: #c2cee0;
+                display: block;
+                margin: 0 0 8px;
+              }
+              .input {
+                display: block;
+                width: 100%;
+                background: #0c1524;
+                color: var(--text);
+                border: 1px solid #34435a;
+                border-radius: 12px;
+                padding: 14px 13px;
+                font-size: 16px;
+                outline: none;
+              }
+              .input:focus { border-color: #5893ff; }
+              .help {
+                font-size: 12px;
+                color: var(--muted);
+                line-height: 1.5;
+              }
+              .btn {
+                border: 0;
+                border-radius: 12px;
+                padding: 14px 15px;
+                color: white;
+                font-size: 15px;
+                font-weight: 700;
+                width: 100%;
+                margin-top: 12px;
+                background: var(--blue);
+              }
+              .btn:disabled { opacity: .5; }
+              .green { background: var(--green); }
+              .red { background: var(--red); }
+              .secondary { background: #26354b; }
+              .row { display: flex; gap: 10px; }
+              .row .btn { flex: 1; }
+              .status {
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 12px 13px;
+                background: #0c1524;
+                color: #cbd7e8;
+                font-size: 13px;
+                line-height: 1.5;
+                overflow-wrap: anywhere;
+              }
+              .status.ok { border-color: #1d7959; color: #aaf2d2; }
+              .status.error { border-color: #913b48; color: #ffc5cb; }
+              .status.warn { border-color: #88672d; color: #ffdfa1; }
+              .section-title { font-size: 16px; margin: 0 0 14px; }
+              .pill {
+                font-size: 11px;
+                background: #22334d;
+                border-radius: 99px;
+                padding: 5px 8px;
+                color: #cfe0ff;
+              }
+              .incoming {
+                display: none;
+                border: 1px solid var(--blue);
+                background: #162b4b;
+                border-radius: 14px;
+                padding: 14px;
+                margin-top: 14px;
+              }
+              .incoming.show { display: block; }
+              .incoming p { margin: 0 0 8px; font-weight: 700; }
+              .audio-state {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 8px;
+                text-align: center;
+              }
+              .foot {
+                color: #8e9cb1;
+                font-size: 11px;
+                line-height: 1.55;
+                text-align: center;
+                padding: 4px 8px 0;
+              }
+              .hidden { display: none !important; }
+            </style>
+          </head>
+          <body>
+            <main class="wrap">
+              <header class="brand">
+                <div class="logo">☎</div>
+                <div>
+                  <h1>Oda Sesli Arama</h1>
+                  <p>İnternet üzerinden bire bir sesli görüşme</p>
+                </div>
+              </header>
 
-      - name: APK dosyasini yukle
-        uses: actions/upload-artifact@v4
-        with:
-          name: OdaSesliArama-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
-          
+              <div id="status" class="status">
+                Başlamak için kendi uygulama kodunu oluştur ve çevrimiçi ol.
+              </div>
+
+              <section class="card">
+                <h2 class="section-title">
+                  1. Senin kodun <span class="pill">Uygulama kimliği</span>
+                </h2>
+                <label class="label" for="myCode">Sana ait kullanıcı kodu</label>
+                <input id="myCode" class="input" inputmode="numeric"
+                       maxlength="32" autocomplete="off"
+                       placeholder="Örn. 05301234567">
+                <p class="help">
+                  Bu gerçek telefon numarası değildir ve normal telefon
+                  şebekesini aramaz. İstersen rakamlardan oluşan bir kod kullan.
+                  Arkadaşına bu kodu ver.
+                </p>
+                <button id="startBtn" class="btn green">Çevrimiçi ol</button>
+                <button id="stopBtn" class="btn secondary hidden">
+                  Çevrimdışı ol
+                </button>
+              </section>
+
+              <section class="card">
+                <h2 class="section-title">2. Arkadaşını ara</h2>
+                <label class="label" for="friendCode">
+                  Arkadaşının uygulama kodu
+                </label>
+                <input id="friendCode" class="input" inputmode="text"
+                       maxlength="32" autocomplete="off"
+                       placeholder="Arkadaşının kodu">
+                <button id="callBtn" class="btn" disabled>
+                  Sesli arama başlat
+                </button>
+                <button id="hangupBtn" class="btn red hidden">
+                  Aramayı bitir
+                </button>
+                <div id="incoming" class="incoming">
+                  <p id="incomingText">Gelen arama</p>
+                  <div class="row">
+                    <button id="acceptBtn" class="btn green">Cevapla</button>
+                    <button id="declineBtn" class="btn red">Reddet</button>
+                  </div>
+                </div>
+                <audio id="remoteAudio" autoplay playsinline></audio>
+                <div id="audioState" class="audio-state">
+                  Mikrofon yalnızca arama başlatırken veya cevap verirken istenir.
+                </div>
+              </section>
+
+              <p class="foot">
+                İnternet ve mikrofon izni gerekir. Aranacak kişinin uygulaması
+                açık ve çevrimiçi olmalıdır. Bu demo, herkese açık PeerJS sinyal
+                hizmetini ve ortak test TURN sunucusunu kullanır; hizmetlerin
+                kullanılabilirliği garanti edilmez. Gerçek telefon numaranı,
+                şifreni veya özel bilgilerini kullanıcı kodu olarak kullanma.
+              </p>
+            </main>
+
+            <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+            <script>
+              (() => {
+                const $ = id => document.getElementById(id);
+                const statusBox = $('status');
+                const myCodeInput = $('myCode');
+                const friendCodeInput = $('friendCode');
+                const startBtn = $('startBtn');
+                const stopBtn = $('stopBtn');
+                const callBtn = $('callBtn');
+           
